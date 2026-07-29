@@ -134,7 +134,7 @@ class BaseBackend(metaclass=abc.ABCMeta):
         :return: None
         """
 
-        self.check_diff(old, new, ["root['issue_system_id']", "root['issue_links']", "root['parent_issue_id']"])
+        self.check_diff(old, new, ["root['issue_system_ids']", "root['issue_links']", "root['parent_issue_id']"])
 
     def check_diff_comment_event(self, old, new):
         """
