@@ -76,12 +76,6 @@ def start():
         issueshark.start(cfg)
     except(KeyboardInterrupt, Exception) as e:
         logger.error(f"Program did not run successfully. Reason:{e}")
-        # logger.info(f"Deleting uncompleted data .....")
-        # delete_last_system_data_on_failure('issue_system', cfg.tracking_url, db_user=cfg.user,
-        #                                          db_password=cfg.password,
-        #                                          db_hostname=cfg.host, db_port=cfg.port,
-        #                                          db_authentication_db=cfg.authentication_db,
-        #                                         db_ssl=cfg.ssl_enabled, db_name=cfg.database)
 
 
 if __name__ == "__main__":
