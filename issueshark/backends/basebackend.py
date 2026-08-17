@@ -118,7 +118,7 @@ class BaseBackend(metaclass=abc.ABCMeta):
                         item.issue_id = issue.id
                         item.save()
             else:
-                self.old_issues['issues'][issue_id]['issue_system_id'].append(self.issue_system_id)
+                self.old_issues['issues'][issue_id]['issue_system_ids'].append(self.issue_system_id)
                 self.old_issues['issues'][issue_id].save()
 
     def check_diff_issue(self, old, new):

@@ -725,7 +725,7 @@ class JiraBackend(BaseBackend):
         if not issue_id:
             try:
                 issue = Issue.objects(issue_system_ids=self.last_system_id, external_id=str(external_id)).get()
-                issue.issue_system_id.append(self.issue_system_id)
+                issue.issue_system_ids.append(self.issue_system_id)
                 issue.save()
                 issue_id = issue.id
             except DoesNotExist:
