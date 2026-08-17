@@ -434,7 +434,7 @@ class JiraBackendTest(unittest.TestCase):
         creator = People.objects(email="christopherrmerrick@gmail.com", username="chrismerrick").get()
         assignee = People.objects(email="christopherrmerrick@gmail.com", username="cmerrick").get()
 
-        self.assertEqual(stored_issue.issue_system_id, self.issues_system_id)
+        self.assertEqual(stored_issue.issue_system_ids, [self.issues_system_id])
         self.assertEqual(stored_issue.title, 'Limit ROP Unit Tests')
         self.assertEqual(stored_issue.desc, None)
         self.assertEqual(stored_issue.created_at, datetime.datetime(2013, 2, 24, 2, 4, 42, 952000))
