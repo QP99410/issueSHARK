@@ -318,6 +318,12 @@ class GithubBackend(BaseBackend):
         if user_url in self.people:
             return self.people[user_url]
 
+        if not hasattr(self, '_people_max_length'):
+            self._people_max_length = {
+                field: getattr(People._fields.get(field), 'max_length', None)
+                for field in ('name', 'email', 'username')
+            }
+
         try:
             raw_user = self._send_request(user_url)
         except Exception:
@@ -332,10 +338,28 @@ class GithubBackend(BaseBackend):
         if email is None:
             email = 'null'
 
+        username = raw_user['login']
+        if username is None:
+            username = 'null'
+
+        def _truncate(value, field):
+            max_len = self._people_max_length[field]
+            if max_len and len(value) > max_len:
+                logger.warning(
+                    "%s exceeds %s limit (%d chars) for %s; truncating.",
+                    field, People.__name__, max_len, user_url
+                )
+                return value[:max_len - 3] + '...'
+            return value
+
+        name = _truncate(name, 'name')
+        email = _truncate(email, 'email')
+        username = _truncate(username, 'username')
+
         people_id = People.objects(
             name=name,
             email=email
-        ).upsert_one(name=name, email=email, username=raw_user['login']).id
+        ).upsert_one(name=name, email=email, username=username).id
         self.people[user_url] = people_id
         return people_id
 
