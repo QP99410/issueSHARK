@@ -4,14 +4,14 @@ import dateutil
 import sys
 
 import time
-from mongoengine import DoesNotExist, MultipleObjectsReturned
+from mongoengine import DoesNotExist
 
 from issueshark.backends.basebackend import BaseBackend
 from urllib.parse import urlparse, quote_plus
 from jira import JIRA, JIRAError
 
 import logging
-import re
+
 from pycoshark.mongomodels import *
 
 
@@ -89,86 +89,48 @@ class JiraBackend(BaseBackend):
             raise JiraException('Jira does not support tokens! Use issue_user and issue_password instead')
 
         url_to_jira = self._create_url_to_jira_rest_interface()
-        version_match = re.search(r'/rest/api/(\d+)/', self.config.tracking_url)
-        api_version = version_match.group(1) if version_match else '2' # Default to 2 if not found
 
         # Connect to jira
         if self.config.issue_user and self.config.issue_password:
             self.jira_client = JIRA(
-                {
-                    'server': url_to_jira, 
-                    'rest_api_version': api_version,
-                    'headers': {'Accept': 'application/json,*/*;q=0.9'}
-                },
+                {'server': url_to_jira},
                 basic_auth=(self.config.issue_user, self.config.issue_password),
                 proxies=self.config.get_proxy_dictionary()
             )
         else:
             self.jira_client = JIRA(
-                {
-                    'server': url_to_jira, 
-                    'rest_api_version': api_version,
-                    'headers': {'Accept': 'application/json,*/*;q=0.9'}
-                },
+                {'server': url_to_jira},
                 proxies=self.config.get_proxy_dictionary()
             )
-        original_request = self.jira_client._session.request
-
-        def patched_request(method, url, *args, **kwargs):
-            if "/rest/api/3/search" in url:
-                url = url.replace("/rest/api/3/search", "/rest/api/3/search/jql")
-            return original_request(method, url, *args, **kwargs)
-
-        self.jira_client._session.request = patched_request
 
         # Get last modification date (since then, we will collect bugs)
         query = self._create_issue_query()
 
-        issues = []
-        next_page_token = None # for Jira v3
-        start_at = 0 # for Jira v2
+        # We search our intital set of issues
+        issues = self.jira_client.search_issues(query, startAt=0, maxResults=50, fields='summary')
+        logger.debug('Found %d issues via url %s' % (
+            len(issues),
+            self.jira_client._get_url('search?jql=%s&startAt=0&maxResults=50' % quote_plus(query))
+        ))
 
-        while True:
-            search_params = {'jql': query, 'maxResults': 50, 'fields': 'summary'}
-            if next_page_token:
-                search_params['nextPageToken'] = next_page_token
-            else:
-                search_params['startAt'] = start_at
-                
-            # Execute search request via the Jira client session
-            response = self.jira_client._session.get(
-                self.jira_client._get_url('search'), 
-                params=search_params
-            )
-            data = response.json()
-            batch_issues = data.get('issues', [])
-            if not batch_issues:
-                break
-            issues.extend(batch_issues)
-            logger.info(f"Fetched batch of {len(batch_issues)} issues. Total collected: {len(issues)}")
-
-            # 1. Check for Jira Cloud pagination (API v3)
-            if 'nextPageToken' in data:
-                if data.get('isLast', True):
-                    break
-                next_page_token = data['nextPageToken']
-                
-            # 2. Check for Jira Server pagination (API v2)
-            else:
-                total_issues = data.get('total', 0)
-                start_at += len(batch_issues)
-                if start_at >= total_issues:
-                    break
-
-        # If no issues found, exit
+        # If no new bugs found, return
         if len(issues) == 0:
             logger.info('No new issues found. Exiting...')
             sys.exit(0)
 
-        logger.info(f"Processing all {len(issues)} issues...")
-        for issue_dict in issues:
-            issue_key = issue_dict.get('id') if isinstance(issue_dict, dict) else issue_dict.key
-            self._process_issue(issue_key)
+        # Otherwise, go through all issues
+        processed_results = 50
+        while processed_results < 51:
+            logger.info("Processing %d issues..." % len(issues))
+            for issue in issues:
+                self._process_issue(issue.key)
+            # Go through the next issues
+            issues = self.jira_client.search_issues(query, startAt=processed_results, maxResults=50, fields='summary')
+            logger.debug('Found %d issues via url %s' %
+                         (len(issues), self.jira_client._get_url('search?jql=%s&startAt=%d&maxResults=50' %
+                                                                (quote_plus(query), processed_results))))
+            print('wow')
+            processed_results += 50
         self.save_issues()
         self.link_issues()
 
@@ -187,11 +149,6 @@ class JiraBackend(BaseBackend):
                 issue = Issue.objects.get(issue_system_ids=self.issue_system_id, external_id=issue_id)
             except DoesNotExist:
                 continue
-            except MultipleObjectsReturned:
-                duplicates = Issue.objects(issue_system_ids=self.issue_system_id, external_id=issue_id)
-                issue = duplicates.first()
-                for dup in duplicates[1:]:
-                    dup.delete()
             for link_issue in issue.issue_links:
                 if isinstance(link_issue['issue_id'], str):
                     link_issue['issue_id'] = self._get_issue_id_by_external_id(link_issue['issue_id'])
@@ -269,7 +226,7 @@ class JiraBackend(BaseBackend):
                     self.jira_client._get_url('issue/%s?expand=changelog' % jira_issue_id))
                 )
                 issue = self.jira_client.issue(jira_issue_id, expand='changelog')
-                # logger.debug('Got fields: %s' % vars(issue.fields))
+                logger.debug('Got fields: %s' % vars(issue.fields))
                 issue_not_retrieved = False
             except JIRAError:
                 time.sleep(30)
@@ -326,20 +283,12 @@ class JiraBackend(BaseBackend):
                     logger.debug('Comment already in database, id: %s' % mongo_comment.id)
                 except DoesNotExist:
                     mongo_comment = None
-                    
-            comment_body = comment.body
-            if comment_body is not None and not isinstance(comment_body, str):
-                if hasattr(comment_body, 'raw'):
-                    comment_body = str(comment_body.raw)
-                else:
-                    comment_body = str(comment_body)
-
             new_comment = IssueComment(
                 external_id=comment.id,
                 created_at=created_at,
-                author_id=self._get_people(comment.author.displayName, self._get_user_email(comment.author),
+                author_id=self._get_people(comment.author.name, self._get_user_email(comment.author),
                                            comment.author.displayName),
-                comment=comment_body,
+                comment=comment.body,
             )
             logger.debug('Resulting comment: %s' % new_comment)
 
@@ -362,13 +311,6 @@ class JiraBackend(BaseBackend):
             self.old_issues['issues'][self.issue_id] = mongo_issue
         except DoesNotExist:
             mongo_issue = None
-        except MultipleObjectsReturned:
-            logger.warning('Duplicate issues found for %s. Dropping duplicates...' % self.issue_id)
-            duplicates = Issue.objects(issue_system_ids=self.last_system_id, external_id=self.issue_id)
-            mongo_issue = duplicates.first()
-            self.old_issues['issues'][self.issue_id] = mongo_issue
-            for dup in duplicates[1:]:
-                dup.delete()
         new_issue = Issue(issue_system_ids=[self.issue_system_id], external_id=jira_issue.key)
 
         for at_name_jira, at_name_mongo in self.jira_mongo_terminology_mapping.items():
@@ -452,15 +394,11 @@ class JiraBackend(BaseBackend):
         :param at_name_jira: attribute name that should be returned
         """
         attribute = getattr(jira_issue_fields, at_name_jira)
-        if attribute is None:
-            return None
         if hasattr(attribute, 'name'):
-            return str(attribute.name)
-        if not isinstance(attribute, (str, int, float, bool)):
-            if hasattr(attribute, 'raw'):
-                return str(attribute.raw)
-            return str(attribute)
-        return attribute
+            return getattr(attribute, 'name')
+        else:
+            return attribute
+
     def _parse_date_field(self, jira_issue_fields, at_name_jira):
         """
         Parses the date jira fields from the original issue
@@ -477,11 +415,7 @@ class JiraBackend(BaseBackend):
         :param jira_issue_fields: fields of the original jira issue
         :param at_name_jira: attribute name that should be returned
         """
-        if hasattr(jira_issue_fields, 'parent') and jira_issue_fields.parent is not None:
-            if hasattr(jira_issue_fields.parent, 'key'):
-                parent_key = jira_issue_fields.parent.key
-                return self._get_issue_id_by_external_id(parent_key)
-        return None
+        return jira_issue_fields.parent.key
 
     def _parse_author_details(self, jira_issue_fields, at_name_jira):
         """
@@ -492,7 +426,7 @@ class JiraBackend(BaseBackend):
         """
         people = getattr(jira_issue_fields, at_name_jira)
         if people is not None:
-            return self._get_people(people.displayName, self._get_user_email(people), people.displayName)
+            return self._get_people(people.name, self._get_user_email(people), people.displayName)
         return None
 
     def _parse_array_field(self, jira_issue_fields, at_name_jira):
@@ -617,7 +551,7 @@ class JiraBackend(BaseBackend):
             # It can happen that an event does not have an author (e.g., ZOOKEEPER-2218)
             author_id = None
             if hasattr(history, 'author'):
-                author_id = self._get_people(history.author.displayName, name=history.author.displayName,
+                author_id = self._get_people(history.author.name, name=history.author.displayName,
                                              email=self._get_user_email(history.author))
 
             for jira_event in history.items:
@@ -671,10 +605,10 @@ class JiraBackend(BaseBackend):
 
         # Map jira terminology to our terminology
         try:
-            new_event.status = self.jira_mongo_terminology_mapping[jira_at_name][:50]
+            new_event.status = self.jira_mongo_terminology_mapping[jira_at_name]
         except KeyError:
             logger.warning('Mapping for attribute %s not found.' % jira_at_name)
-            new_event.status = jira_at_name[:50]
+            new_event.status = jira_at_name
 
         if new_event.status == 'assignee_id':
             if getattr(jira_event, 'from') is not None:
@@ -758,7 +692,7 @@ class JiraBackend(BaseBackend):
 
         # It can happen that a user is no longer available
         try:
-            return self.jira_client.find('user?accountId={0}', username)
+            return self.jira_client.find('user?username={0}', username)
         except JIRAError:
             return None
 
@@ -788,12 +722,6 @@ class JiraBackend(BaseBackend):
                 'id').get().id
         except DoesNotExist:
             pass
-        except MultipleObjectsReturned:
-            duplicates = Issue.objects(issue_system_ids=self.issue_system_id, external_id=str(external_id))
-            issue_id = duplicates.first().id
-            for dup in duplicates[1:]:
-                dup.delete()
-
         if not issue_id:
             try:
                 issue = Issue.objects(issue_system_ids=self.last_system_id, external_id=str(external_id)).get()
@@ -802,13 +730,5 @@ class JiraBackend(BaseBackend):
                 issue_id = issue.id
             except DoesNotExist:
                 issue_id = Issue(issue_system_ids=[self.issue_system_id], external_id=str(external_id)).save().id
-            except MultipleObjectsReturned:
-                duplicates = Issue.objects(issue_system_ids=self.last_system_id, external_id=str(external_id))
-                issue = duplicates.first()
-                for dup in duplicates[1:]:
-                    dup.delete()
-                issue.issue_system_ids.append(self.issue_system_id)
-                issue.save()
-                issue_id = issue.id
 
         return issue_id
